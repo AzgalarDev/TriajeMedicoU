@@ -1,0 +1,191 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMINISTRATOR
+  PHYSICIAN
+  PATIENT
+  ASSISTANT
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  BLOCKED
+}
+
+enum Sex {
+  MALE
+  FEMALE
+}
+
+enum TriageStatus {
+  DRAFT
+  IN_PROGRESS
+  PENDING_REVIEW
+  APPROVED
+  CANCELLED
+}
+
+enum Severity {
+  MILD
+  MODERATE
+  SEVERE
+  CRITICAL
+}
+
+enum AnswerStatus {
+  ANSWERED
+  NOT_APPLICABLE
+  UNKNOWN
+  UNABLE_TO_ASSESS
+}
+
+model User {
+  id                 String            @id @default(uuid()) @db.Uuid
+  fullName           String            @map("full_name")
+  dateOfBirth        DateTime          @map("date_of_birth") @db.Date
+  sex                Sex
+  nationalId         String            @unique @map("national_id") @db.VarChar(32)
+  address            String?
+  username           String            @unique @db.VarChar(64)
+  passwordHash       String            @map("password_hash")
+  role               UserRole
+  status             UserStatus        @default(ACTIVE)
+  patientProfile     PatientProfile?
+  sessions           Session[]
+  createdTriages     Triage[]          @relation("TriagePhysician")
+  patientTriages     Triage[]          @relation("TriagePatient")
+  createdVersions    TriageVersion[]   @relation("VersionAuthor")
+  approvedVersions   TriageVersion[]   @relation("VersionApprover")
+  createdAt          DateTime          @default(now()) @map("created_at")
+  updatedAt          DateTime          @updatedAt @map("updated_at")
+
+  @@map("users")
+}
+
+model Session {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  tokenHash String    @unique @map("token_hash") @db.VarChar(128)
+  expiresAt DateTime  @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@index([userId, expiresAt])
+  @@map("sessions")
+}
+
+model PatientProfile {
+  id                String   @id @default(uuid()) @db.Uuid
+  userId            String   @unique @map("user_id") @db.Uuid
+  medicalHistory    String?  @map("medical_history")
+  allergies         String?
+  currentMedications String? @map("current_medications")
+  chronicConditions String?  @map("chronic_conditions")
+  user              User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  @@map("patient_profiles")
+}
+
+model Triage {
+  id              String          @id @default(uuid()) @db.Uuid
+  idempotencyKey  String?         @unique @map("idempotency_key") @db.VarChar(128)
+  requestFingerprint String?      @map("request_fingerprint") @db.VarChar(64)
+  physicianId     String          @map("physician_id") @db.Uuid
+  status          TriageStatus    @default(DRAFT)
+  currentVersion  Int             @default(1) @map("current_version")
+  physician       User            @relation("TriagePhysician", fields: [physicianId], references: [id], onDelete: Restrict)
+  patient         User            @relation("TriagePatient", fields: [patientId], references: [id], onDelete: Restrict)
+  patientId       String          @map("patient_id") @db.Uuid
+  versions        TriageVersion[]
+  createdAt       DateTime        @default(now()) @map("created_at")
+  updatedAt       DateTime        @updatedAt @map("updated_at")
+
+  @@index([patientId, createdAt])
+  @@index([physicianId, createdAt])
+  @@map("triages")
+}
+
+model TriageVersion {
+  id                    String          @id @default(uuid()) @db.Uuid
+  triageId              String          @map("triage_id") @db.Uuid
+  versionNumber         Int             @map("version_number")
+  createdById           String          @map("created_by_id") @db.Uuid
+  approvedById          String?         @map("approved_by_id") @db.Uuid
+  status                TriageStatus
+  preliminarySeverity   Severity?       @map("preliminary_severity")
+  finalSeverity         Severity?       @map("final_severity")
+  overrideJustification String?         @map("override_justification")
+  modelOutput           String?         @map("model_output")
+  privateNotes          String?         @map("private_notes")
+  description           String?
+  triage                Triage          @relation(fields: [triageId], references: [id], onDelete: Restrict)
+  createdBy             User            @relation("VersionAuthor", fields: [createdById], references: [id], onDelete: Restrict)
+  approvedBy            User?           @relation("VersionApprover", fields: [approvedById], references: [id], onDelete: Restrict)
+  symptoms              TriageSymptom[]
+  questions             TriageQuestion[]
+  recommendations       Recommendation[]
+  createdAt             DateTime        @default(now()) @map("created_at")
+
+  @@unique([triageId, versionNumber])
+  @@map("triage_versions")
+}
+
+model TriageSymptom {
+  id              String        @id @default(uuid()) @db.Uuid
+  triageVersionId String        @map("triage_version_id") @db.Uuid
+  name            String
+  description     String?
+  severity        Severity?
+  triageVersion   TriageVersion  @relation(fields: [triageVersionId], references: [id], onDelete: Restrict)
+
+  @@index([triageVersionId])
+  @@map("triage_symptoms")
+}
+
+model TriageQuestion {
+  id              String          @id @default(uuid()) @db.Uuid
+  triageVersionId String          @map("triage_version_id") @db.Uuid
+  questionText    String          @map("question_text")
+  priority        Int             @default(0)
+  triageVersion   TriageVersion    @relation(fields: [triageVersionId], references: [id], onDelete: Restrict)
+  answer          TriageAnswer?
+
+  @@index([triageVersionId, priority])
+  @@map("triage_questions")
+}
+
+model TriageAnswer {
+  id          String         @id @default(uuid()) @db.Uuid
+  questionId  String         @unique @map("question_id") @db.Uuid
+  status      AnswerStatus
+  answerText  String?        @map("answer_text")
+  observations String?
+  question    TriageQuestion @relation(fields: [questionId], references: [id], onDelete: Restrict)
+  createdAt   DateTime       @default(now()) @map("created_at")
+
+  @@map("triage_answers")
+}
+
+model Recommendation {
+  id              String        @id @default(uuid()) @db.Uuid
+  triageVersionId String        @map("triage_version_id") @db.Uuid
+  content         String
+  sortOrder       Int           @default(0) @map("sort_order")
+  isApproved      Boolean       @default(false) @map("is_approved")
+  triageVersion   TriageVersion @relation(fields: [triageVersionId], references: [id], onDelete: Restrict)
+  createdAt       DateTime      @default(now()) @map("created_at")
+
+  @@index([triageVersionId, sortOrder])
+  @@map("recommendations")
+}

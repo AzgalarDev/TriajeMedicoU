@@ -1,0 +1,158 @@
+classDiagram
+direction LR
+
+class Usuario {
+  +UUID id
+  +String nombreCompleto
+  +Date fechaNacimiento
+  +Sexo sexo
+  +String ci
+  +String dirección
+  +String nombreDeUsuario
+  -String hashDeContraseña
+  +RolUsuario rol
+  +EstadoUsuario estado
+}
+
+class Sesion {
+  +UUID id
+  +UUID usuarioId
+  -String hashDelToken
+  +DateTime fechaDeExpiración
+  +DateTime fechaDeRevocación
+}
+
+class PerfilPaciente {
+  +UUID id
+  +UUID usuarioId
+  +String antecedentesMédicos
+  +String alergias
+  +String medicamentosActuales
+  +String enfermedadesCrónicas
+}
+
+class Triaje {
+  +UUID id
+  +String claveDeIdempotencia
+  +String huellaDeSolicitud
+  +UUID médicoId
+  +UUID pacienteId
+  +EstadoTriaje estado
+  +Int versiónActual
+}
+
+class VersionTriaje {
+  +UUID id
+  +UUID triajeId
+  +Int númeroDeVersión
+  +UUID creadoPorId
+  +UUID aprobadoPorId
+  +EstadoTriaje estado
+  +Gravedad gravedadPreliminar
+  +Gravedad gravedadFinal
+  +String justificaciónDeCambio
+  +String salidaDelModelo
+  +String notasPrivadas
+  +String descripción
+}
+
+class SintomaTriaje {
+  +UUID id
+  +UUID versiónTriajeId
+  +String nombre
+  +String descripción
+  +Gravedad gravedad
+}
+
+class PreguntaTriaje {
+  <<solo esquema>>
+  +UUID id
+  +UUID versiónTriajeId
+  +String textoDeLaPregunta
+  +Int prioridad
+}
+
+class RespuestaTriaje {
+  <<solo esquema>>
+  +UUID id
+  +UUID preguntaId
+  +EstadoRespuesta estado
+  +String textoDeRespuesta
+  +String observaciones
+}
+
+class Recomendacion {
+  <<solo esquema>>
+  +UUID id
+  +UUID versiónTriajeId
+  +String contenido
+  +Int orden
+  +Boolean estáAprobada
+}
+
+class RolUsuario {
+  <<enumeración>>
+  ADMINISTRATOR
+  PHYSICIAN
+  PATIENT
+  ASSISTANT
+}
+
+class EstadoUsuario {
+  <<enumeración>>
+  ACTIVE
+  INACTIVE
+  BLOCKED
+}
+
+class Sexo {
+  <<enumeración>>
+  MALE
+  FEMALE
+}
+
+class EstadoTriaje {
+  <<enumeración>>
+  DRAFT
+  IN_PROGRESS
+  PENDING_REVIEW
+  APPROVED
+  CANCELLED
+}
+
+class Gravedad {
+  <<enumeración>>
+  MILD
+  MODERATE
+  SEVERE
+  CRITICAL
+}
+
+class EstadoRespuesta {
+  <<enumeración>>
+  ANSWERED
+  NOT_APPLICABLE
+  UNKNOWN
+  UNABLE_TO_ASSESS
+}
+
+Usuario "1" *-- "0..*" Sesion : mantiene
+Usuario "1" -- "0..1" PerfilPaciente : posee
+Usuario "1" -- "0..*" Triaje : médico
+Usuario "1" -- "0..*" Triaje : paciente
+Triaje "1" o-- "1..*" VersionTriaje : contiene
+Usuario "1" -- "0..*" VersionTriaje : crea
+Usuario "1" -- "0..*" VersionTriaje : aprueba
+VersionTriaje "1" o-- "0..*" SintomaTriaje : registra
+VersionTriaje "1" o-- "0..*" PreguntaTriaje : formula
+PreguntaTriaje "1" o-- "0..1" RespuestaTriaje : recibe
+VersionTriaje "1" o-- "0..*" Recomendacion : propone
+
+Usuario --> RolUsuario
+Usuario --> EstadoUsuario
+Usuario --> Sexo
+Triaje --> EstadoTriaje
+VersionTriaje --> EstadoTriaje
+VersionTriaje --> Gravedad
+SintomaTriaje --> Gravedad
+RespuestaTriaje --> EstadoRespuesta

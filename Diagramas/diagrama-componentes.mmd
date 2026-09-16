@@ -1,0 +1,46 @@
+flowchart LR
+  subgraph Actores["Actores"]
+    Admin["Administrador"]
+    Medico["Médico"]
+    Ayudante["Ayudante"]
+    Paciente["Paciente"]
+  end
+
+  subgraph Cliente["Aplicación cliente"]
+    Frontend["Frontend React / Vite\nAcceso · Administración · Perfil · Espacio clínico"]
+  end
+
+  subgraph Servidor["Servidor de aplicaciones"]
+    API["API HTTP NestJS"]
+    Auth["Módulo de autenticación\ny administración"]
+    Clinico["Módulo clínico"]
+    Salud["Módulo de salud"]
+    Prisma["PrismaService / Cliente Prisma"]
+  end
+
+  subgraph Datos["Servidor de base de datos"]
+    PostgreSQL[("PostgreSQL")]
+  end
+
+  Admin --> Frontend
+  Medico --> Frontend
+  Ayudante --> Frontend
+  Paciente --> Frontend
+  Frontend -->|"HTTPS / JSON · cookie de sesión"| API
+  API --> Auth
+  API --> Clinico
+  API --> Salud
+  Clinico -->|"Guards de sesión y rol"| Auth
+  Auth --> Prisma
+  Clinico --> Prisma
+  Salud --> Prisma
+  Prisma -->|"DATABASE_URL"| PostgreSQL
+
+  classDef actor fill:#F8FAFC,stroke:#64748B,color:#0F172A;
+  classDef client fill:#DBEAFE,stroke:#2563EB,color:#172554;
+  classDef module fill:#ECFDF5,stroke:#059669,color:#064E3B;
+  classDef data fill:#FEF3C7,stroke:#D97706,color:#78350F;
+  class Admin,Medico,Ayudante,Paciente actor;
+  class Frontend client;
+  class API,Auth,Clinico,Salud,Prisma module;
+  class PostgreSQL data;

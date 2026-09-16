@@ -1,0 +1,40 @@
+flowchart LR
+  subgraph Cliente["«dispositivo» Equipo del usuario"]
+    Navegador["«artefacto» Navegador web\nInterfaz React"]
+  end
+
+  subgraph Web["«nodo» Servidor web"]
+    Frontend["«artefacto» Aplicación React / Vite\nHTML · CSS · JavaScript"]
+  end
+
+  subgraph APIHost["«nodo» Servidor de aplicaciones"]
+    Node["«entorno de ejecución» Node.js"]
+    Backend["«artefacto» API NestJS\nAutenticación · Administración · Clínica · Salud"]
+    Prisma["«artefacto» Prisma Client"]
+    Node --> Backend
+    Backend --> Prisma
+  end
+
+  subgraph DockerHost["«nodo» Host Docker"]
+    subgraph Contenedor["«contenedor» PostgreSQL 16 Alpine"]
+      PostgreSQL[("«base de datos»\ntriajemedicou")]
+      Volumen["«volumen persistente»\npostgres_data"]
+      PostgreSQL --- Volumen
+    end
+  end
+
+  Navegador -->|"HTTPS"| Frontend
+  Frontend -->|"HTTP/HTTPS · JSON\nCookie de sesión"| Backend
+  Prisma -->|"TCP 5432 · PostgreSQL\nDATABASE_URL"| PostgreSQL
+
+  classDef device fill:#DBEAFE,stroke:#2563EB,color:#172554,stroke-width:2px;
+  classDef server fill:#ECFDF5,stroke:#059669,color:#064E3B,stroke-width:2px;
+  classDef runtime fill:#F0FDF4,stroke:#16A34A,color:#14532D;
+  classDef database fill:#FEF3C7,stroke:#D97706,color:#78350F,stroke-width:2px;
+  classDef volume fill:#FFF7ED,stroke:#EA580C,color:#7C2D12;
+
+  class Navegador device;
+  class Frontend,Backend server;
+  class Node,Prisma runtime;
+  class PostgreSQL database;
+  class Volumen volume;
