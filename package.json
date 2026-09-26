@@ -4,6 +4,6 @@
   "workspaces": ["backend", "frontend"],
   "scripts": {
     "build": "npm run build --workspace backend && npm run build --workspace frontend",
-    "check": "npm run prisma:validate --workspace backend && npm run test --workspace backend && npm run test --workspace frontend && npm run build --workspace backend && npm run build --workspace frontend"
+    "check": "node scripts/check-focused-tests.mjs && npm run prisma:validate --workspace backend && npm run test --workspace backend && npm run test --workspace frontend && npm run build --workspace backend && npm run build --workspace frontend"
   }
 }

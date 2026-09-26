@@ -64,6 +64,9 @@ model User {
   patientTriages     Triage[]          @relation("TriagePatient")
   createdVersions    TriageVersion[]   @relation("VersionAuthor")
   approvedVersions   TriageVersion[]   @relation("VersionApprover")
+  createdRecommendations Recommendation[] @relation("RecommendationCreator")
+  updatedRecommendations Recommendation[] @relation("RecommendationUpdater")
+  approvedRecommendations Recommendation[] @relation("RecommendationApprover")
   createdAt          DateTime          @default(now()) @map("created_at")
   updatedAt          DateTime          @updatedAt @map("updated_at")
 
@@ -116,7 +119,7 @@ model Triage {
   @@map("triages")
 }
 
-model TriageVersion {
+  model TriageVersion {
   id                    String          @id @default(uuid()) @db.Uuid
   triageId              String          @map("triage_id") @db.Uuid
   versionNumber         Int             @map("version_number")
@@ -127,6 +130,27 @@ model TriageVersion {
   finalSeverity         Severity?       @map("final_severity")
   overrideJustification String?         @map("override_justification")
   modelOutput           String?         @map("model_output")
+  classificationRationale String?      @map("classification_rationale")
+  classificationRawOutput String?      @map("classification_raw_output")
+  classificationInputFingerprint String? @map("classification_input_fingerprint") @db.VarChar(64)
+  classificationModelName String?      @map("classification_model_name")
+  classificationGeneratedAt DateTime?  @map("classification_generated_at")
+  classificationConfirmedAt DateTime?  @map("classification_confirmed_at")
+  classificationGeneratingAt DateTime? @map("classification_generating_at")
+  classificationClaimToken String? @map("classification_claim_token") @db.VarChar(128)
+  classificationClaimedAt DateTime? @map("classification_claimed_at")
+  classificationInputSnapshot String? @map("classification_input_snapshot")
+  classificationRevision Int           @default(0) @map("classification_revision")
+  recommendationInputFingerprint String? @map("recommendation_input_fingerprint") @db.VarChar(64)
+  recommendationRawOutput String? @map("recommendation_raw_output")
+  recommendationModelName String? @map("recommendation_model_name")
+  recommendationGeneratedAt DateTime? @map("recommendation_generated_at")
+  recommendationClaimToken String? @map("recommendation_claim_token") @db.VarChar(128)
+  recommendationClaimedAt DateTime? @map("recommendation_claimed_at")
+  recommendationClaimFingerprint String? @map("recommendation_claim_fingerprint") @db.VarChar(64)
+  recommendationClaimCollectionRevision Int? @map("recommendation_claim_collection_revision")
+  recommendationCollectionRevision Int @default(0) @map("recommendation_collection_revision")
+  recommendationRevision Int @default(0) @map("recommendation_revision")
   privateNotes          String?         @map("private_notes")
   description           String?
   triage                Triage          @relation(fields: [triageId], references: [id], onDelete: Restrict)
@@ -136,6 +160,7 @@ model TriageVersion {
   questions             TriageQuestion[]
   recommendations       Recommendation[]
   createdAt             DateTime        @default(now()) @map("created_at")
+  updatedAt             DateTime        @updatedAt @map("updated_at")
 
   @@unique([triageId, versionNumber])
   @@map("triage_versions")
@@ -160,8 +185,9 @@ model TriageQuestion {
   priority        Int             @default(0)
   triageVersion   TriageVersion    @relation(fields: [triageVersionId], references: [id], onDelete: Restrict)
   answer          TriageAnswer?
+  createdAt       DateTime        @default(now()) @map("created_at")
 
-  @@index([triageVersionId, priority])
+  @@unique([triageVersionId, priority])
   @@map("triage_questions")
 }
 
@@ -173,6 +199,7 @@ model TriageAnswer {
   observations String?
   question    TriageQuestion @relation(fields: [questionId], references: [id], onDelete: Restrict)
   createdAt   DateTime       @default(now()) @map("created_at")
+  updatedAt   DateTime       @updatedAt @map("updated_at")
 
   @@map("triage_answers")
 }
@@ -183,9 +210,25 @@ model Recommendation {
   content         String
   sortOrder       Int           @default(0) @map("sort_order")
   isApproved      Boolean       @default(false) @map("is_approved")
+  source          RecommendationSource @default(MODEL)
+  createdById     String?       @map("created_by_id") @db.Uuid
+  updatedById     String?       @map("updated_by_id") @db.Uuid
+  approvedById    String?       @map("approved_by_id") @db.Uuid
+  approvedAt      DateTime?     @map("approved_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+  revision        Int           @default(0)
   triageVersion   TriageVersion @relation(fields: [triageVersionId], references: [id], onDelete: Restrict)
+  createdBy       User?         @relation("RecommendationCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  updatedBy       User?         @relation("RecommendationUpdater", fields: [updatedById], references: [id], onDelete: Restrict)
+  approvedBy      User?         @relation("RecommendationApprover", fields: [approvedById], references: [id], onDelete: Restrict)
   createdAt       DateTime      @default(now()) @map("created_at")
 
   @@index([triageVersionId, sortOrder])
+  @@unique([triageVersionId, sortOrder])
   @@map("recommendations")
+}
+
+enum RecommendationSource {
+  MODEL
+  MANUAL
 }

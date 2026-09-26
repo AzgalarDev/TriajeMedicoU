@@ -1,12 +1,37 @@
-import { request, type User } from '../../lib/api';
+import * as React from 'react';
+import { BrowserRouter, Navigate, NavLink, Outlet, Route, Routes } from 'react-router-dom';
+import { request, searchPatients, type PatientSummary, type User } from '../../lib/api';
 import { BrandHeader } from '../../components/BrandHeader';
+import { Button } from '../../components/ui/Button';
+import { Input } from '../../components/ui/Input';
+import { ClinicalPageHeader, FeedbackMessage, PatientCard } from '../../components/clinical/ClinicalComponents';
 import { AdminProvisioning } from '../admin/AdminProvisioning';
 import { AdminUsers } from '../admin/AdminUsers';
 import { PatientProfile } from '../patient/PatientProfile';
-import { StaffClinicalWorkspace } from '../clinical/StaffClinicalWorkspace';
+import { ClassificationScreen, ClinicalHistoryScreen, ClinicalProfileScreen, NewTriageScreen, PatientRouteLayout, PatientSummaryScreen, QuestionsScreen, RecommendationsScreen } from '../clinical/ClinicalScreens';
+import { LOGOUT_PENDING_KEY, LOGOUT_PENDING_WARNING } from '../../app/App';
 
-export function AuthenticatedLanding({ user, onLogout }: { user: User; onLogout: () => void }) {
-  const logout = async () => { try { await request('/auth/logout', { method: 'POST' }); } catch { /* keep local logout resilient when the API is unavailable */ } onLogout(); };
-  const staff = user.role === 'PHYSICIAN' || user.role === 'ASSISTANT';
-  return <div className="min-h-screen overflow-x-hidden bg-[radial-gradient(circle_at_top_right,#dceff0,transparent_38%),#f4f8fb] px-[clamp(14px,4vw,32px)] py-[clamp(20px,5vw,48px)]"><BrandHeader subtitle={user.role === 'ADMINISTRATOR' ? 'Panel de administración' : staff ? 'Espacio de personal' : 'Espacio del paciente'} action={<button className="ml-auto rounded-[9px] border border-[#b8cbd6] bg-transparent px-3 py-2 text-xs text-[#31516a]" onClick={logout}>Cerrar sesión</button>} />{user.role === 'ADMINISTRATOR' ? <><AdminProvisioning /><AdminUsers currentUserId={user.id} /></> : staff ? <StaffClinicalWorkspace physician={user.role === 'PHYSICIAN'} /> : <><h1 className="mx-auto mt-4 w-full max-w-[680px] text-2xl font-bold">Hola, {user.username}</h1><PatientProfile /></>}</div>;
+const labels: Record<string, string> = { PHYSICIAN: 'Médico', ASSISTANT: 'Ayudante', ADMINISTRATOR: 'Administrador', PATIENT: 'Paciente' };
+const staff = (role: string) => role === 'PHYSICIAN' || role === 'ASSISTANT';
+
+function Shell({ user, onLogout }: { user: User; onLogout: (message?: string) => void }) {
+  const [loggingOut, setLoggingOut] = React.useState(false);
+  const [open, setOpen] = React.useState(false);
+  const logout = async () => { if (loggingOut) return; setLoggingOut(true); onLogout(); try { await request('/auth/logout', { method: 'POST' }); localStorage.removeItem(LOGOUT_PENDING_KEY); } catch { localStorage.setItem(LOGOUT_PENDING_KEY, '1'); onLogout(LOGOUT_PENDING_WARNING); } };
+  const links = user.role === 'ADMINISTRATOR' ? [['/inicio', 'Inicio'], ['/cuentas/nueva', 'Crear cuenta'], ['/cuentas', 'Usuarios']] : user.role === 'PATIENT' ? [['/inicio', 'Inicio'], ['/perfil-clinico', 'Perfil clínico']] : [['/inicio', 'Inicio'], ['/pacientes', 'Pacientes']];
+  return <div className="min-h-screen bg-[#f4f8fb] px-[clamp(14px,4vw,32px)] py-4 sm:py-5"><BrandHeader subtitle={`${labels[user.role] ?? user.role} · TriajeMedicoU`} action={<Button disabled={loggingOut} className="ml-auto min-h-11 px-3 text-xs" onClick={logout}>{loggingOut ? 'Cerrando sesión…' : 'Cerrar sesión'}</Button>} /><button type="button" className="mb-2 min-h-11 rounded-lg border border-[#cbdbe5] bg-white px-3 text-sm font-bold lg:hidden" aria-expanded={open} aria-controls="primary-navigation" onClick={() => setOpen(v => !v)}>Menú principal</button><nav id="primary-navigation" aria-label="Navegación principal" className={`${open ? 'flex' : 'hidden'} mx-auto flex-col gap-1 rounded-xl border border-[#dce7ee] bg-white p-2 lg:flex lg:max-w-[1200px] lg:flex-row lg:flex-wrap`}>{links.map(([to, text]) => <NavLink onClick={() => setOpen(false)} key={to} to={to} className={({ isActive }) => `min-h-11 rounded-lg px-3 py-3 text-sm font-bold ${isActive ? 'bg-[#147d7e] text-white' : 'text-[#31516a] hover:bg-[#effaf8]'}`}>{text}</NavLink>)}</nav><main className="mx-auto w-full max-w-[1200px] py-5"><Outlet /></main></div>;
+}
+
+function Home({ user }: { user: User }) { return <PatientCard><ClinicalPageHeader eyebrow="Espacio clínico" title={`Hola, ${user.username}`} description={staff(user.role) ? 'Continúa con el flujo clínico seleccionando un paciente. Su contexto se mantendrá visible durante todo el proceso.' : user.role === 'PATIENT' ? 'Consulta y actualiza tu perfil clínico.' : 'Gestiona las cuentas del sistema desde las opciones de administración.'} /></PatientCard>; }
+
+function SearchPatients() {
+  const [query, setQuery] = React.useState(''); const [results, setResults] = React.useState<PatientSummary[]>([]); const [error, setError] = React.useState(''); const sequence = React.useRef(0);
+  const submit = async (e: React.FormEvent) => { e.preventDefault(); const value = query.trim(); if (!value) { sequence.current++; setResults([]); setError('La búsqueda requiere CI o al menos 2 caracteres del nombre del paciente'); return; } const id = ++sequence.current; try { const items = await searchPatients(value); if (id === sequence.current) { setResults(items); setError(''); } } catch (err) { if (id === sequence.current) setError((err as Error).message); } };
+  return <><ClinicalPageHeader title="Pacientes" description="Busca por CI o por nombre para abrir el expediente clínico." /><PatientCard><form className="flex flex-col gap-3 sm:flex-row" onSubmit={submit}><label className="sr-only" htmlFor="patient-search">CI o nombre parcial</label><Input id="patient-search" value={query} onChange={e => setQuery(e.target.value)} placeholder="CI o nombre parcial" /><Button type="submit" aria-label="Buscar">Buscar pacientes</Button></form><div className="mt-4"><FeedbackMessage message={error} type="alert" /></div></PatientCard>{results.length > 0 && <div className="mt-4 grid gap-3">{results.map(item => <PatientCard key={item.id}><div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="font-bold">{item.fullName}</h2><p className="mt-1 text-sm text-[#678096]">CI: {item.nationalId} · Fecha de nacimiento: {item.dateOfBirth.slice(0, 10)}</p></div><NavLink className="inline-flex min-h-11 items-center justify-center rounded-[10px] bg-[#147d7e] px-4 py-3 text-sm font-bold text-white" to={`/pacientes/${item.id}/resumen`}>Abrir expediente</NavLink></div></PatientCard>)}</div>}</>;
+}
+
+export function AuthenticatedLanding({ user, onLogout }: { user: User; onLogout: (message?: string) => void }) {
+  const role = user.role;
+  const physician = role === 'PHYSICIAN';
+  return <BrowserRouter><Routes><Route element={<Shell user={user} onLogout={onLogout} />}><Route path="/" element={<Navigate to="/inicio" replace />} /><Route path="/inicio" element={<Home user={user} />} />{role === 'ADMINISTRATOR' && <><Route path="/cuentas/nueva" element={<AdminProvisioning />} /><Route path="/cuentas" element={<AdminUsers currentUserId={user.id} />} /></>}{role === 'PATIENT' && <Route path="/perfil-clinico" element={<PatientProfile />} />}{staff(role) && <><Route path="/pacientes" element={<SearchPatients />} /><Route path="/pacientes/:patientId/resumen" element={<PatientRouteLayout>{p => <PatientSummaryScreen patient={p} physician={physician} />}</PatientRouteLayout>} /><Route path="/pacientes/:patientId/perfil" element={<PatientRouteLayout>{(p, reload) => <ClinicalProfileScreen patient={p} physician={physician} reload={reload} />}</PatientRouteLayout>} /><Route path="/pacientes/:patientId/historial" element={<PatientRouteLayout>{p => <ClinicalHistoryScreen patient={p} physician={physician} />}</PatientRouteLayout>} />{physician && <><Route path="/pacientes/:patientId/nuevo-triaje" element={<PatientRouteLayout>{(p, reload) => <NewTriageScreen patient={p} reload={reload} />}</PatientRouteLayout>} /><Route path="/pacientes/:patientId/triajes/:triageId/preguntas" element={<PatientRouteLayout>{p => <QuestionsScreen patient={p} />}</PatientRouteLayout>} /><Route path="/pacientes/:patientId/triajes/:triageId/clasificacion" element={<PatientRouteLayout>{p => <ClassificationScreen patient={p} />}</PatientRouteLayout>} /><Route path="/pacientes/:patientId/triajes/:triageId/recomendaciones" element={<PatientRouteLayout>{p => <RecommendationsScreen patient={p} />}</PatientRouteLayout>} /></>}</>}</Route><Route path="*" element={<Navigate to="/inicio" replace />} /></Routes></BrowserRouter>;
 }

@@ -1,0 +1,13 @@
+ALTER TABLE "triage_versions" ADD COLUMN "classification_rationale" TEXT;
+ALTER TABLE "triage_versions" ADD COLUMN "classification_raw_output" TEXT;
+ALTER TABLE "triage_versions" ADD COLUMN "classification_input_fingerprint" VARCHAR(64);
+ALTER TABLE "triage_versions" ADD COLUMN "classification_model_name" TEXT;
+ALTER TABLE "triage_versions" ADD COLUMN "classification_generated_at" TIMESTAMP(3);
+ALTER TABLE "triage_versions" ADD COLUMN "classification_confirmed_at" TIMESTAMP(3);
+ALTER TABLE "triage_versions" ADD COLUMN "classification_generating_at" TIMESTAMP(3);
+ALTER TABLE "triage_versions" ADD COLUMN "classification_claim_token" VARCHAR(128);
+ALTER TABLE "triage_versions" ADD COLUMN "classification_claimed_at" TIMESTAMP(3);
+ALTER TABLE "triage_versions" ADD COLUMN "classification_input_snapshot" TEXT;
+ALTER TABLE "triage_versions" ADD COLUMN "classification_revision" INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE "triage_versions" ADD COLUMN "updated_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP;
+CREATE INDEX "triage_versions_classification_input_fingerprint_idx" ON "triage_versions"("classification_input_fingerprint");

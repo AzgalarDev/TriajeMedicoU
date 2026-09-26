@@ -2,14 +2,15 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { StaffClinicalWorkspace } from './StaffClinicalWorkspace';
-import { createTriage, getClinicalPatient, searchPatients, updateClinicalProfile, type ClinicalPatient, type PatientSummary } from '../../lib/api';
+import { answerQuestion, createTriage, generateQuestions, getClinicalPatient, searchPatients, updateClinicalProfile, type ClinicalPatient, type PatientSummary } from '../../lib/api';
 
-vi.mock('../../lib/api', () => ({ searchPatients: vi.fn(), getClinicalPatient: vi.fn(), updateClinicalProfile: vi.fn(), createTriage: vi.fn() }));
+vi.mock('../../lib/api', () => ({ searchPatients: vi.fn(), getClinicalPatient: vi.fn(), updateClinicalProfile: vi.fn(), createTriage: vi.fn(), generateQuestions: vi.fn(), answerQuestion: vi.fn() }));
 
 const summary: PatientSummary = { id: 'patient-1', fullName: 'Ana Pérez', nationalId: '12345', dateOfBirth: '1990-01-01T00:00:00.000Z' };
 const patient: ClinicalPatient = { ...summary, sex: 'FEMALE', address: 'Calle 1', patientProfile: { medicalHistory: 'Asma', allergies: 'Sin alergias conocidas', currentMedications: 'Salbutamol', chronicConditions: 'Asma' }, patientTriages: [{ id: 'triage-1', status: 'APPROVED', createdAt: '2026-09-01T00:00:00.000Z', physician: { fullName: 'Médico Uno' }, versions: [{ status: 'APPROVED', symptoms: [{ name: 'Fiebre' }] }] }] };
 const otherSummary: PatientSummary = { id: 'patient-2', fullName: 'Ben Gómez', nationalId: '67890', dateOfBirth: '1988-02-02T00:00:00.000Z' };
 const otherPatient: ClinicalPatient = { ...patient, ...otherSummary, patientTriages: [] };
+const generatedPatient: ClinicalPatient = { ...patient, patientTriages: [{ ...patient.patientTriages[0], status: 'IN_PROGRESS', versions: [{ id: 'version-1', status: 'IN_PROGRESS', symptoms: [{ name: 'Fiebre' }], questions: [{ id: 'question-1', questionText: '¿Desde cuándo?', priority: 1, answer: { status: 'UNKNOWN', answerText: null, observations: null, updatedAt: '2026-09-01T00:00:00.000Z' } }] }] }] };
 
 beforeEach(() => { vi.clearAllMocks(); });
 
@@ -215,5 +216,48 @@ describe('StaffClinicalWorkspace', () => {
     expect(screen.queryByRole('heading', { name: 'Ana Pérez' })).not.toBeInTheDocument();
     expect(screen.queryByText(/En progreso · 2026-09-11/)).not.toBeInTheDocument();
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('lets physicians generate questions, shows the local-model disclaimer, and renders loading/error states', async () => {
+    vi.mocked(searchPatients).mockResolvedValue([summary]); vi.mocked(getClinicalPatient).mockResolvedValue(generatedPatient);
+    let resolve: (value: any) => void = () => undefined; vi.mocked(generateQuestions).mockReturnValue(new Promise((r) => { resolve = r; }));
+    const ui = userEvent.setup(); render(<StaffClinicalWorkspace physician />);
+    await ui.type(screen.getByLabelText('CI o nombre parcial'), 'Ana'); await ui.click(screen.getByRole('button', { name: 'Buscar' })); await ui.click(await screen.findByRole('button', { name: /Ana Pérez/ }));
+    expect(screen.getByText(/asistencia local solo propone preguntas/i)).toBeInTheDocument(); await ui.click(screen.getByRole('button', { name: 'Generar preguntas' })); expect(screen.getByRole('button', { name: 'Generando preguntas...' })).toBeDisabled();
+    await act(async () => resolve({ questions: generatedPatient.patientTriages[0].versions[0].questions })); expect((await screen.findAllByRole('status'))[0]).toHaveTextContent('Preguntas clínicas generadas.');
+  });
+
+  it('shows generation-specific adjacent error feedback', async () => {
+    vi.mocked(searchPatients).mockResolvedValue([summary]); vi.mocked(getClinicalPatient).mockResolvedValue(generatedPatient); vi.mocked(generateQuestions).mockRejectedValue(new Error('La respuesta clínica local contiene prioridades duplicadas.'));
+    const ui = userEvent.setup(); render(<StaffClinicalWorkspace physician />);
+    await ui.type(screen.getByLabelText('CI o nombre parcial'), 'Ana'); await ui.click(screen.getByRole('button', { name: 'Buscar' })); await ui.click(await screen.findByRole('button', { name: /Ana Pérez/ }));
+    const section = screen.getByRole('heading', { name: 'Preguntas clínicas adicionales' }).closest('section')!;
+    await ui.click(screen.getByRole('button', { name: 'Generar preguntas' }));
+    await waitFor(() => expect(section).toHaveTextContent('La respuesta clínica local contiene prioridades duplicadas.'));
+    expect((await screen.findAllByRole('alert')).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('shows generation-specific success feedback and displays questions after a successful retry result', async () => {
+    const retryQuestions = [{ id: 'question-2', questionText: '¿Ha tenido fiebre medida?', priority: 2, answer: null }];
+    vi.mocked(searchPatients).mockResolvedValue([summary]); vi.mocked(getClinicalPatient).mockResolvedValue({ ...generatedPatient, patientTriages: [{ ...generatedPatient.patientTriages[0], versions: [{ ...generatedPatient.patientTriages[0].versions[0], questions: [] }] }] }); vi.mocked(generateQuestions).mockResolvedValue({ questions: retryQuestions });
+    const ui = userEvent.setup(); render(<StaffClinicalWorkspace physician />);
+    await ui.type(screen.getByLabelText('CI o nombre parcial'), 'Ana'); await ui.click(screen.getByRole('button', { name: 'Buscar' })); await ui.click(await screen.findByRole('button', { name: /Ana Pérez/ }));
+    const section = screen.getByRole('heading', { name: 'Preguntas clínicas adicionales' }).closest('section')!;
+    await ui.click(screen.getByRole('button', { name: 'Generar preguntas' }));
+    await waitFor(() => expect(section).toHaveTextContent('Preguntas clínicas generadas.'));
+    expect(screen.getByText('2. ¿Ha tenido fiebre medida?')).toBeInTheDocument();
+  });
+
+  it('sends Spanish status/text semantics and reconciles the returned answer timestamp', async () => {
+    vi.mocked(searchPatients).mockResolvedValue([summary]); vi.mocked(getClinicalPatient).mockResolvedValue(generatedPatient); vi.mocked(answerQuestion).mockResolvedValue({ status: 'ANSWERED', answerText: 'Sí', observations: 'Observado', updatedAt: '2026-09-16T00:00:00.000Z' });
+    const ui = userEvent.setup(); render(<StaffClinicalWorkspace physician />); await ui.type(screen.getByLabelText('CI o nombre parcial'), 'Ana'); await ui.click(screen.getByRole('button', { name: 'Buscar' })); await ui.click(await screen.findByRole('button', { name: /Ana Pérez/ }));
+    const select = screen.getByLabelText('Estado: ¿Desde cuándo?'); await ui.selectOptions(select, 'ANSWERED'); await ui.type(screen.getByLabelText('Respuesta: ¿Desde cuándo?'), 'Sí'); await ui.type(screen.getByLabelText('Observaciones: ¿Desde cuándo?'), 'Observado'); await ui.click(screen.getByRole('button', { name: 'Guardar respuesta' }));
+    expect(answerQuestion).toHaveBeenCalledWith('question-1', expect.objectContaining({ status: 'ANSWERED', answerText: 'Sí', observations: 'Observado', expectedUpdatedAt: '2026-09-01T00:00:00.000Z' })); expect(await screen.findByRole('status')).toHaveTextContent('Respuesta guardada.');
+  });
+
+  it('keeps assistant and approved versions free of LLM questions and mutation controls', async () => {
+    vi.mocked(searchPatients).mockResolvedValue([summary]); vi.mocked(getClinicalPatient).mockResolvedValue(generatedPatient); const ui = userEvent.setup(); render(<StaffClinicalWorkspace physician={false} />);
+    await ui.type(screen.getByLabelText('CI o nombre parcial'), 'Ana'); await ui.click(screen.getByRole('button', { name: 'Buscar' })); await ui.click(await screen.findByRole('button', { name: /Ana Pérez/ }));
+    expect(screen.queryByText('Preguntas clínicas adicionales')).not.toBeInTheDocument(); expect(screen.queryByRole('button', { name: /generar preguntas/i })).not.toBeInTheDocument();
   });
 });

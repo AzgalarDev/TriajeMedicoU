@@ -13,3 +13,5 @@ These defaults are only for local development. Production and shared environment
 The matching local `DATABASE_URL` is shown in `backend/.env.example`.
 
 Password recovery throttling is an in-memory MVP safeguard controlled by `PASSWORD_RECOVERY_LIMIT` and `PASSWORD_RECOVERY_WINDOW_MINUTES`. It resets when the backend process restarts and does not coordinate across multiple backend instances.
+
+The local clinical question provider uses Ollama. Copy the values from `backend/.env.example`; `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, and `OLLAMA_TIMEOUT_MS` are local configuration only. Automated tests mock the provider and never call Ollama.
