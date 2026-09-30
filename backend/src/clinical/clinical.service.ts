@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, NotImplementedException, ServiceUnavailableException } from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
@@ -10,6 +10,7 @@ import { CLINICAL_LLM_PROVIDER, ClinicalLlmProvider } from './llm.provider';
 import { Inject } from '@nestjs/common';
 import { isSafeGeneratedQuestion } from './question-safety';
 import { isSafeRecommendation } from './recommendation-safety';
+import { AuditEventDto, CorrectionInputDto, CurrentGuidanceDto, PublicationHistoryDto, PublicationRevisionDto, PublishInputDto } from './dto/publication.dto';
 
 const staffRoles = ['PHYSICIAN', 'ASSISTANT'] as const;
 const validAnswerStatuses = ['ANSWERED', 'NOT_APPLICABLE', 'UNKNOWN', 'UNABLE_TO_ASSESS'] as const;
@@ -18,6 +19,11 @@ const profileSelect = { medicalHistory: true, allergies: true, currentMedication
 const triageFingerprint = (patientId: string, physicianId: string, dto: CreateTriageDto) => createHash('sha256').update(JSON.stringify({ operation: 'CREATE_TRIAGE', patientId, physicianId, status: dto.status ?? 'DRAFT', description: dto.description?.trim() ?? null, symptoms: dto.symptoms.map((symptom) => ({ name: symptom.name.trim(), description: symptom.description?.trim() ?? null, severity: symptom.severity ?? null })).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))) })).digest('hex');
 const classificationInvalidationData = () => ({ preliminarySeverity: null, classificationRationale: null, classificationRawOutput: null, classificationModelName: null, classificationInputFingerprint: null, classificationInputSnapshot: null, classificationGeneratedAt: null, classificationConfirmedAt: null, classificationGeneratingAt: null, classificationClaimToken: null, classificationClaimedAt: null, finalSeverity: null, overrideJustification: null, classificationRevision: { increment: 1 }, updatedAt: new Date() });
 const recommendationFingerprint = (version: { classificationRevision: number; classificationInputFingerprint?: string | null; classificationInputSnapshot?: string | null; finalSeverity?: string | null; overrideJustification?: string | null }) => createHash('sha256').update(JSON.stringify({ classificationRevision: version.classificationRevision, classificationInputSnapshot: version.classificationInputSnapshot ?? null, classificationInputFingerprint: version.classificationInputFingerprint ?? null, finalSeverity: version.finalSeverity ?? null, overrideJustification: version.overrideJustification ?? null })).digest('hex');
+const publicationHash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const lockActivePhysician = async (tx: Prisma.TransactionClient, physicianId: string) => {
+  const rows = await tx.$queryRaw<Array<{ id: string; role: string; status: string }>>(Prisma.sql`SELECT "id", "role", "status" FROM "users" WHERE "id" = ${physicianId} FOR UPDATE`);
+  return rows[0]?.role === 'PHYSICIAN' && rows[0]?.status === 'ACTIVE';
+};
 
 @Injectable()
 export class ClinicalService {
@@ -213,6 +219,73 @@ export class ClinicalService {
   async deleteRecommendation(triageId: string, versionId: string, recommendationId: string, physicianId: string, revision: number, expectedUpdatedAt: string, collectionRevision: number) { const r = await this.editableRecommendation(triageId, versionId, recommendationId, physicianId, revision); return this.prisma.$transaction(async tx => { const guard = await tx.triageVersion.updateMany({ where: { id: versionId, triageId, createdById: physicianId, status: 'PENDING_REVIEW', recommendationCollectionRevision: collectionRevision }, data: { recommendationCollectionRevision: { increment: 1 } } }); if (guard.count !== 1) throw new ConflictException('La colección cambió. Conserva los valores actuales y recarga.'); const deleted = await tx.recommendation.deleteMany({ where: { id: r.id, revision, updatedAt: new Date(expectedUpdatedAt) } }); if (deleted.count !== 1) throw new ConflictException('La recomendación cambió. Conserva los valores actuales y recarga.'); const rest = await tx.recommendation.findMany({ where: { triageVersionId: versionId }, orderBy: { sortOrder: 'asc' } }); for (const [i, item] of rest.entries()) await tx.recommendation.update({ where: { id: item.id }, data: { sortOrder: -(i + 1) } }); for (const [i, item] of rest.entries()) await tx.recommendation.update({ where: { id: item.id }, data: { sortOrder: i + 1, revision: { increment: 1 }, updatedById: physicianId } }); return { deleted: true }; }); }
   async reorderRecommendations(triageId: string, versionId: string, physicianId: string, ids: string[], collectionRevision: number) { await this.recommendationVersion(triageId, versionId, physicianId); const current = await this.prisma.recommendation.findMany({ where: { triageVersionId: versionId }, orderBy: { sortOrder: 'asc' } }); if (ids.length !== current.length || new Set(ids).size !== ids.length || ids.some(id => !current.some(r => r.id === id))) throw new ConflictException('El orden de las recomendaciones cambió. Recarga antes de reordenar.'); return this.prisma.$transaction(async tx => { const guard = await tx.triageVersion.updateMany({ where: { id: versionId, triageId, createdById: physicianId, status: 'PENDING_REVIEW', recommendationCollectionRevision: collectionRevision }, data: { recommendationCollectionRevision: { increment: 1 } } }); if (guard.count !== 1) throw new ConflictException('La colección cambió. Conserva los valores actuales y recarga.'); for (const [i, id] of ids.entries()) await tx.recommendation.update({ where: { id }, data: { sortOrder: -(i + 1) } }); for (const [i, id] of ids.entries()) await tx.recommendation.update({ where: { id }, data: { sortOrder: i + 1, revision: { increment: 1 }, updatedById: physicianId } }); return { recommendations: await tx.recommendation.findMany({ where: { triageVersionId: versionId }, orderBy: { sortOrder: 'asc' } }) }; }); }
   async approveRecommendation(triageId: string, versionId: string, recommendationId: string, physicianId: string, approved: boolean, revision: number, expectedUpdatedAt: string, collectionRevision: number) { const r = await this.editableRecommendation(triageId, versionId, recommendationId, physicianId, revision); return this.prisma.$transaction(async tx => { const guard = await tx.triageVersion.updateMany({ where: { id: versionId, triageId, createdById: physicianId, status: 'PENDING_REVIEW', recommendationCollectionRevision: collectionRevision }, data: { recommendationCollectionRevision: { increment: 1 } } }); if (guard.count !== 1) throw new ConflictException('La colección cambió. Conserva los valores actuales y recarga.'); const updated = await tx.recommendation.updateMany({ where: { id: r.id, revision, updatedAt: new Date(expectedUpdatedAt) }, data: { isApproved: approved, approvedById: approved ? physicianId : null, approvedAt: approved ? new Date() : null, updatedById: physicianId, revision: { increment: 1 } } }); if (updated.count !== 1) throw new ConflictException('La recomendación cambió. Conserva los valores actuales y recarga.'); return tx.recommendation.findUniqueOrThrow({ where: { id: r.id } }); }); }
+  async publish(triageId: string, versionId: string, physicianId: string, input: PublishInputDto) {
+    const physician = await this.prisma.user.findFirst({ where: { id: physicianId, role: 'PHYSICIAN', status: 'ACTIVE' }, select: { id: true } });
+    if (!physician) throw new ForbiddenException('Se requiere acceso de médico activo');
+    return this.prisma.$transaction(async (tx) => {
+      if (!await lockActivePhysician(tx, physicianId)) throw new ForbiddenException('Se requiere acceso de médico activo');
+      const version = await tx.triageVersion.findFirst({ where: { id: versionId, triageId, createdById: physicianId, status: 'PENDING_REVIEW' }, include: { recommendations: { orderBy: { sortOrder: 'asc' } }, triage: true } });
+      if (!version) throw new NotFoundException('Versión de triaje no encontrada');
+      if (version.classificationRevision !== input.expectedClinicalRevision || version.recommendationCollectionRevision !== input.expectedCollectionRevision || version.recommendationRevision !== input.expectedRecommendationRevision) throw new ConflictException('La revisión clínica o de recomendaciones cambió. Recargue antes de publicar.');
+      if (!version.recommendations.length) throw new BadRequestException('Se requiere al menos una recomendación aprobada para publicar.');
+      if (version.recommendations.some((recommendation) => !recommendation.isApproved || !isSafeRecommendation(recommendation.content))) throw new BadRequestException('Todas las recomendaciones deben estar aprobadas y cumplir las reglas de seguridad.');
+      const recommendations = version.recommendations.map((recommendation) => recommendation.content);
+      const snapshot = { triageId, triageVersionId: versionId, severity: version.finalSeverity, recommendations, clinicalRevision: version.classificationRevision, collectionRevision: version.recommendationCollectionRevision, recommendationRevision: version.recommendationRevision };
+      const contentHash = publicationHash(snapshot);
+      const versionGuard = await tx.triageVersion.updateMany({ where: { id: versionId, triageId, createdById: physicianId, status: 'PENDING_REVIEW', classificationRevision: input.expectedClinicalRevision, recommendationCollectionRevision: input.expectedCollectionRevision, recommendationRevision: input.expectedRecommendationRevision }, data: { status: 'APPROVED' } });
+      if (versionGuard.count !== 1) throw new ConflictException('La versión cambió mientras se publicaba. Recargue antes de publicar.');
+      const triageGuard = await tx.triage.updateMany({ where: { id: triageId, status: 'PENDING_REVIEW' }, data: { status: 'APPROVED' } });
+      if (triageGuard.count !== 1) throw new ConflictException('El triaje cambió mientras se publicaba. Recargue antes de publicar.');
+      const publication = await tx.publication.create({ data: { triageId, triageVersionId: versionId, publishedById: physicianId, status: 'PUBLISHED' } });
+      const revision = await tx.publicationRevision.create({ data: { publicationId: publication.id, revisionNumber: 1, triageVersionId: versionId, actorId: physicianId, severity: version.finalSeverity, recommendations, snapshot, contentHash } });
+      await tx.publication.update({ where: { id: publication.id }, data: { currentRevisionId: revision.id } });
+      await tx.auditEvent.create({ data: { publicationId: publication.id, revisionId: revision.id, actorId: physicianId, action: 'PUBLISHED', afterHash: contentHash, metadata: { triageId, versionId } } });
+      return { publicationId: publication.id, revisionId: revision.id, snapshot, contentHash };
+    });
+  }
+  async correctPublication(triageId: string, versionId: string, physicianId: string, input: CorrectionInputDto) {
+    const physician = await this.prisma.user.findFirst({ where: { id: physicianId, role: 'PHYSICIAN', status: 'ACTIVE' }, select: { id: true } });
+    if (!physician) throw new ForbiddenException('Se requiere acceso de médico activo');
+    const reason = input.reason.trim();
+    if (!reason) throw new BadRequestException('La corrección requiere un motivo.');
+    if (!input.recommendations.length || input.recommendations.some((recommendation) => !isSafeRecommendation(recommendation))) throw new BadRequestException('La corrección contiene recomendaciones no permitidas.');
+    return this.prisma.$transaction(async (tx) => {
+      if (!await lockActivePhysician(tx, physicianId)) throw new ForbiddenException('Se requiere acceso de médico activo');
+      const publication = await tx.publication.findFirst({ where: { triageId, triageVersionId: versionId, publishedById: physicianId }, include: { revisions: { orderBy: { revisionNumber: 'desc' }, take: 1 } } });
+      if (!publication || !publication.revisions.length) throw new NotFoundException('Publicación no encontrada');
+      const previous = publication.revisions[0];
+      if (previous.revisionNumber !== input.expectedPublicationRevision) throw new ConflictException('La publicación cambió mientras se corregía. Recargue el historial.');
+      const snapshot = { triageId, triageVersionId: versionId, severity: previous.severity, recommendations: input.recommendations, reason };
+      const contentHash = publicationHash(snapshot);
+      const publicationGuard = await tx.publication.updateMany({ where: { id: publication.id, currentRevisionId: previous.id }, data: { status: 'CORRECTED' } });
+      if (publicationGuard.count !== 1) throw new ConflictException('La publicación cambió mientras se corregía. Recargue el historial.');
+      const revision = await tx.publicationRevision.create({ data: { publicationId: publication.id, revisionNumber: previous.revisionNumber + 1, supersedesRevisionId: previous.id, triageVersionId: versionId, actorId: physicianId, severity: previous.severity, recommendations: input.recommendations, snapshot, contentHash, reason } });
+      const currentGuard = await tx.publication.updateMany({ where: { id: publication.id, currentRevisionId: previous.id, status: 'CORRECTED' }, data: { currentRevisionId: revision.id } });
+      if (currentGuard.count !== 1) throw new ConflictException('La publicación cambió mientras se corregía. Recargue el historial.');
+      await tx.auditEvent.create({ data: { publicationId: publication.id, revisionId: revision.id, actorId: physicianId, action: 'CORRECTED', beforeHash: previous.contentHash, afterHash: contentHash, metadata: { reason } } });
+      return { publicationId: publication.id, revisionId: revision.id, snapshot, contentHash };
+    });
+  }
+  async getCurrentGuidance(patientId: string, userId: string, role: string): Promise<CurrentGuidanceDto | null> {
+    if (role === 'PATIENT' && patientId !== userId) throw new ForbiddenException('Solo puede consultar su propia orientación clínica.');
+    if (!['PATIENT', 'ASSISTANT', 'PHYSICIAN'].includes(role)) throw new ForbiddenException('Acceso no autorizado.');
+    const publication = await this.prisma.publication.findFirst({ where: { status: { in: ['PUBLISHED', 'CORRECTED'] }, triage: { patientId } }, orderBy: [{ createdAt: 'desc' }, { updatedAt: 'desc' }], include: { currentRevision: true } });
+    if (!publication?.currentRevision) return null;
+    const revision = publication.currentRevision;
+    return { publicationId: publication.id, revisionId: revision.id, publishedAt: revision.publishedAt.toISOString(), severity: revision.severity, recommendations: revision.recommendations as string[] };
+  }
+  async getPublicationHistory(triageId: string, physicianId: string): Promise<PublicationHistoryDto> {
+    const publication = await this.prisma.publication.findFirst({ where: { triageId, triage: { physicianId } } });
+    if (!publication) throw new NotFoundException('Publicación no encontrada');
+    const revisions = await this.prisma.publicationRevision.findMany({ where: { publicationId: publication.id }, orderBy: { revisionNumber: 'asc' } });
+    return { triageId, revisions: revisions.map((revision): PublicationRevisionDto => ({ publicationId: publication.id, revisionId: revision.id, publishedAt: revision.publishedAt.toISOString(), severity: revision.severity, recommendations: revision.recommendations as string[], revisionNumber: revision.revisionNumber, supersedesRevisionId: revision.supersedesRevisionId, contentHash: revision.contentHash, actorId: revision.actorId, reason: revision.reason })) };
+  }
+  async getPublicationAudit(triageId: string, physicianId: string): Promise<AuditEventDto[]> {
+    const publication = await this.prisma.publication.findFirst({ where: { triageId, triage: { physicianId } }, select: { id: true } });
+    if (!publication) throw new NotFoundException('Publicación no encontrada');
+    const events = await this.prisma.auditEvent.findMany({ where: { publicationId: publication.id }, orderBy: { occurredAt: 'asc' } });
+    return events.map(event => ({ id: event.id, action: event.action, actorId: event.actorId, publicationId: event.publicationId, revisionId: event.revisionId, occurredAt: event.occurredAt.toISOString(), beforeHash: event.beforeHash, afterHash: event.afterHash }));
+  }
 }
 
 export function assertStaff(role: string): asserts role is typeof staffRoles[number] { if (!staffRoles.includes(role as typeof staffRoles[number])) throw new ForbiddenException('Se requiere acceso del personal clínico'); }

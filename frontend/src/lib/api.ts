@@ -6,7 +6,7 @@ export type ManagedRole = 'PHYSICIAN' | 'ASSISTANT' | 'ADMINISTRATOR';
 export type ProvisionUser = { fullName: string; dateOfBirth: string; sex: 'MALE' | 'FEMALE'; nationalId: string; address?: string; username: string; password: string; role: ManagedRole };
 export type PatientSummary = { id: string; fullName: string; nationalId: string; dateOfBirth: string };
 export type ClinicalQuestion = { id: string; questionText: string; priority: number; answer?: { status: string; answerText?: string | null; observations?: string | null; updatedAt?: string } | null };
-export type ClinicalPatient = PatientSummary & { sex: string; address?: string; patientProfile: PatientProfile | null; patientTriages: Array<{ id: string; status: string; createdAt: string; physician: { fullName: string }; versions: Array<{ id?: string; status: string; updatedAt?: string; description?: string | null; preliminarySeverity?: string | null; finalSeverity?: string | null; classificationRationale?: string | null; classificationConfirmedAt?: string | null; recommendationRevision?: number; recommendationCollectionRevision?: number; symptoms: Array<{ name: string; description?: string | null }>; questions?: ClinicalQuestion[]; recommendations?: Recommendation[] }> }> };
+export type ClinicalPatient = PatientSummary & { sex: string; address?: string; patientProfile: PatientProfile | null; patientTriages: Array<{ id: string; status: string; createdAt: string; physician: { fullName: string }; versions: Array<{ id?: string; status: string; updatedAt?: string; description?: string | null; preliminarySeverity?: string | null; finalSeverity?: string | null; classificationRationale?: string | null; classificationConfirmedAt?: string | null; classificationRevision?: number; recommendationRevision?: number; recommendationCollectionRevision?: number; symptoms: Array<{ name: string; description?: string | null }>; questions?: ClinicalQuestion[]; recommendations?: Recommendation[] }> }> };
 export function searchPatients(query: string) {
   const trimmed = query.trim();
   const params = new URLSearchParams(/^\d+$/.test(trimmed) ? { nationalId: trimmed } : { query: trimmed });
@@ -22,6 +22,13 @@ export function generateClassification(triageId: string, versionId: string) { re
 export function confirmClassification(triageId: string, versionId: string, input: { severity: string; justification?: string; expectedUpdatedAt: string }) { return request<ClassificationResult>(`/clinical/triages/${triageId}/versions/${versionId}/classification/confirm`, { method: 'PUT', body: JSON.stringify(input) }); }
 export type Recommendation = { id: string; content: string; sortOrder: number; isApproved: boolean; source: 'MODEL' | 'MANUAL'; createdAt?: string; updatedAt: string; approvedAt?: string | null; revision: number; createdBy?: { fullName: string } | null; updatedBy?: { fullName: string } | null; approvedBy?: { fullName: string } | null };
 export type RecommendationCollection = { triageId: string; versionId: string; status: string; finalSeverity: string; updatedAt: string; recommendationRevision: number; recommendationCollectionRevision: number; recommendations: Recommendation[] };
+export type PublishInput = { expectedClinicalRevision: number; expectedCollectionRevision: number; expectedRecommendationRevision: number };
+export type CorrectionInput = { expectedPublicationRevision: number; reason: string; recommendations: string[] };
+export type CurrentGuidance = { publicationId: string; revisionId: string; publishedAt: string; severity: string | null; recommendations: string[] };
+export type PublicationRevision = CurrentGuidance & { revisionNumber: number; supersedesRevisionId: string | null; contentHash: string; actorId: string; reason: string | null };
+export type PublicationHistory = { triageId: string; revisions: PublicationRevision[] };
+export type PublicationAuditEvent = { id: string; action: string; actorId: string; publicationId: string; revisionId: string | null; occurredAt: string; beforeHash: string | null; afterHash: string | null };
+export type ApiError = Error & { status?: number; code?: string; details?: Record<string, string> };
 export function getRecommendations(triageId: string, versionId: string) { return request<RecommendationCollection>(`/clinical/triages/${triageId}/versions/${versionId}/recommendations`); }
 export function generateRecommendations(triageId: string, versionId: string, collectionRevision = 0) { return request<RecommendationCollection>(`/clinical/triages/${triageId}/versions/${versionId}/recommendations/generate`, { method: 'POST', body: JSON.stringify({ collectionRevision }) }); }
 export function addRecommendation(triageId: string, versionId: string, content: string, collectionRevision = 0) { return request<Recommendation>(`/clinical/triages/${triageId}/versions/${versionId}/recommendations`, { method: 'POST', body: JSON.stringify({ content, collectionRevision }) }); }
@@ -29,6 +36,11 @@ export function editRecommendation(triageId: string, versionId: string, id: stri
 export function deleteRecommendation(triageId: string, versionId: string, id: string, revision: number, updatedAt = new Date(0).toISOString(), collectionRevision = 0) { return request<{ deleted: boolean }>(`/clinical/triages/${triageId}/versions/${versionId}/recommendations/${id}`, { method: 'DELETE', body: JSON.stringify({ revision, updatedAt, collectionRevision }) }); }
 export function reorderRecommendations(triageId: string, versionId: string, ids: string[], collectionRevision = 0) { return request<{ recommendations: Recommendation[] }>(`/clinical/triages/${triageId}/versions/${versionId}/recommendations/order`, { method: 'PUT', body: JSON.stringify({ ids, collectionRevision }) }); }
 export function approveRecommendation(triageId: string, versionId: string, id: string, approved: boolean, revision: number, updatedAt = new Date(0).toISOString(), collectionRevision = 0) { return request<Recommendation>(`/clinical/triages/${triageId}/versions/${versionId}/recommendations/${id}/approval`, { method: 'PUT', body: JSON.stringify({ approved, revision, updatedAt, collectionRevision }) }); }
+export function publish(triageId: string, versionId: string, input: PublishInput) { return request<{ publicationId: string; revisionId: string; snapshot: unknown; contentHash: string }>(`/clinical/triages/${triageId}/versions/${versionId}/publication`, { method: 'POST', body: JSON.stringify(input) }); }
+export function correctPublication(triageId: string, versionId: string, input: CorrectionInput) { return request<{ publicationId: string; revisionId: string; snapshot: unknown; contentHash: string }>(`/clinical/triages/${triageId}/versions/${versionId}/publication/corrections`, { method: 'POST', body: JSON.stringify(input) }); }
+export function getCurrentGuidance(patientId: string) { return request<CurrentGuidance | null>(`/clinical/patients/${patientId}/current-guidance`); }
+export function getPublicationHistory(triageId: string) { return request<PublicationHistory>(`/clinical/triages/${triageId}/publication-history`); }
+export function getPublicationAudit(triageId: string) { return request<PublicationAuditEvent[]>(`/clinical/triages/${triageId}/publication-audit`); }
 
 export function provisionUser(input: ProvisionUser) { return request<User & { fullName: string }>('/auth/users', { method: 'POST', body: JSON.stringify(input) }); }
 export type ManagedUser = User & { fullName: string; nationalId: string };
@@ -40,6 +52,6 @@ export function updateUserIdentity(id: string, nationalId: string) { return requ
 export async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, { ...options, credentials: 'include', headers: { 'Content-Type': 'application/json', ...options?.headers } });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) { const error = new Error(Array.isArray(data.message) ? data.message.join(' ') : data.message ?? 'No se pudo completar la solicitud.') as Error & { status?: number }; error.status = response.status; throw error; }
+  if (!response.ok) { const error = new Error(Array.isArray(data.message) ? data.message.join(' ') : data.message ?? 'No se pudo completar la solicitud.') as ApiError; error.status = response.status; error.code = data.code; error.details = data.details; throw error; }
   return data;
 }

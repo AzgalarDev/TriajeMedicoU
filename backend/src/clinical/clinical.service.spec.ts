@@ -4,6 +4,15 @@ import { Prisma } from '@prisma/client';
 
 const patientSelect = { id: true, fullName: true, nationalId: true, dateOfBirth: true };
 const profileSelect = { medicalHistory: true, allergies: true, currentMedications: true, chronicConditions: true };
+const makePublicationTx = () => ({
+  $queryRaw: jest.fn().mockResolvedValue([{ id: 'physician-1', role: 'PHYSICIAN', status: 'ACTIVE' }]),
+  user: { findFirst: jest.fn().mockResolvedValue({ id: 'physician-1', role: 'PHYSICIAN', status: 'ACTIVE' }) },
+  triageVersion: { findFirst: jest.fn().mockResolvedValue({ id: 'version-1', triageId: 'triage-1', createdById: 'physician-1', status: 'PENDING_REVIEW', finalSeverity: 'MILD', classificationRevision: 4, recommendationCollectionRevision: 5, recommendationRevision: 6, recommendations: [{ id: 'recommendation-1', content: 'Mantener seguimiento clínico.', sortOrder: 1, isApproved: true }], triage: { id: 'triage-1', status: 'PENDING_REVIEW' } }), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+  triage: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+  publication: { findFirst: jest.fn(), create: jest.fn().mockResolvedValue({ id: 'publication-1' }), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+  publicationRevision: { create: jest.fn().mockResolvedValue({ id: 'revision-1', revisionNumber: 1 }) },
+  auditEvent: { create: jest.fn() },
+});
 
 describe('ClinicalService patient search', () => {
   it('rejects empty searches instead of returning the first patients', async () => {
@@ -27,6 +36,165 @@ describe('ClinicalService patient search', () => {
     await new ClinicalService(prisma as never).searchPatients({ query: 'ana' });
 
     expect(prisma.user.findMany).toHaveBeenCalledWith({ where: { role: 'PATIENT', fullName: { contains: 'ana', mode: 'insensitive' } }, select: patientSelect, orderBy: { fullName: 'asc' }, take: 50 });
+  });
+});
+
+describe('ClinicalService publication transaction', () => {
+  const safeRecommendation = { id: 'recommendation-1', content: 'Mantener seguimiento clínico.', sortOrder: 1, isApproved: true };
+  const version = { id: 'version-1', triageId: 'triage-1', createdById: 'physician-1', status: 'PENDING_REVIEW', finalSeverity: 'MILD', classificationRevision: 4, recommendationCollectionRevision: 5, recommendationRevision: 6, recommendations: [safeRecommendation], triage: { id: 'triage-1', patientId: 'patient-1', status: 'PENDING_REVIEW' } };
+
+  const publicationTx = () => ({
+    $queryRaw: jest.fn().mockResolvedValue([{ id: 'physician-1', role: 'PHYSICIAN', status: 'ACTIVE' }]),
+    user: { findFirst: jest.fn().mockResolvedValue({ id: 'physician-1', role: 'PHYSICIAN', status: 'ACTIVE' }) },
+    triageVersion: { findFirst: jest.fn().mockResolvedValue(version), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+    triage: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+    publication: { findFirst: jest.fn(), create: jest.fn().mockResolvedValue({ id: 'publication-1' }), update: jest.fn().mockResolvedValue({ id: 'publication-1' }), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+    publicationRevision: { create: jest.fn().mockResolvedValue({ id: 'revision-1', revisionNumber: 1 }) },
+    auditEvent: { create: jest.fn().mockResolvedValue({ id: 'audit-1' }) },
+  });
+
+  it('publishes the exact ordered approved safe set atomically and creates revision/audit records', async () => {
+    const tx = makePublicationTx();
+    const prisma = { user: { findFirst: jest.fn().mockResolvedValue({ id: 'physician-1', role: 'PHYSICIAN', status: 'ACTIVE' }) }, $transaction: jest.fn((fn) => fn(tx)) };
+    const input = { expectedClinicalRevision: 4, expectedCollectionRevision: 5, expectedRecommendationRevision: 6 };
+    await expect(new ClinicalService(prisma as never).publish('triage-1', 'version-1', 'physician-1', input)).resolves.toEqual(expect.objectContaining({ publicationId: 'publication-1', revisionId: 'revision-1' }));
+    expect(tx.publication.create).toHaveBeenCalled();
+    expect(tx.publicationRevision.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ publicationId: 'publication-1', triageVersionId: 'version-1', revisionNumber: 1, recommendations: [safeRecommendation.content] }) }));
+    expect(tx.auditEvent.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ publicationId: 'publication-1', revisionId: 'revision-1', action: 'PUBLISHED' }) }));
+  });
+
+  it.each([
+    ['stale clinical revision', { expectedClinicalRevision: 3, expectedCollectionRevision: 5, expectedRecommendationRevision: 6 }],
+    ['empty recommendations', { expectedClinicalRevision: 4, expectedCollectionRevision: 5, expectedRecommendationRevision: 6 }],
+  ])('rejects %s before creating any publication rows', async (_case, input) => {
+    const tx = makePublicationTx();
+    tx.triageVersion.findFirst.mockResolvedValue(version);
+    if (_case === 'empty recommendations') tx.triageVersion.findFirst.mockResolvedValue({ ...version, recommendations: [] });
+    const prisma = { user: { findFirst: jest.fn().mockResolvedValue({ id: 'physician-1', role: 'PHYSICIAN', status: 'ACTIVE' }) }, $transaction: jest.fn((fn) => fn(tx)) };
+    await expect(new ClinicalService(prisma as never).publish('triage-1', 'version-1', 'physician-1', _case === 'stale clinical revision' ? input : { ...input, expectedClinicalRevision: 4 })).rejects.toThrow();
+    expect(tx.publication.create).not.toHaveBeenCalled();
+    expect(tx.publicationRevision.create).not.toHaveBeenCalled();
+    expect(tx.auditEvent.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('ClinicalService publication corrections and post-publication safety', () => {
+  it('appends a safe correction, supersedes the prior revision, updates current, and audits the link', async () => {
+    const tx = {
+      $queryRaw: jest.fn().mockResolvedValue([{ id: 'physician-1', role: 'PHYSICIAN', status: 'ACTIVE' }]),
+      user: { findFirst: jest.fn().mockResolvedValue({ id: 'physician-1', role: 'PHYSICIAN', status: 'ACTIVE' }) },
+      publication: { findFirst: jest.fn().mockResolvedValue({ id: 'publication-1', triageVersionId: 'version-1', currentRevisionId: 'revision-1', revisions: [{ id: 'revision-1', revisionNumber: 1, recommendations: ['Mantener seguimiento clínico.'], contentHash: 'before' }] }), update: jest.fn().mockResolvedValue({ id: 'publication-1', currentRevisionId: 'revision-2' }), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+      publicationRevision: { create: jest.fn().mockResolvedValue({ id: 'revision-2', revisionNumber: 2 }) },
+      auditEvent: { create: jest.fn().mockResolvedValue({ id: 'audit-2' }) },
+    };
+    const prisma = { user: { findFirst: jest.fn().mockResolvedValue({ id: 'physician-1', role: 'PHYSICIAN', status: 'ACTIVE' }) }, $transaction: jest.fn((fn) => fn(tx)) };
+    await expect(new ClinicalService(prisma as never).correctPublication('triage-1', 'version-1', 'physician-1', { expectedPublicationRevision: 1, reason: 'Actualización clínica', recommendations: ['Mantener seguimiento clínico actualizado.'] })).resolves.toEqual(expect.objectContaining({ revisionId: 'revision-2' }));
+    expect(tx.publicationRevision.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ supersedesRevisionId: 'revision-1', reason: 'Actualización clínica' }) }));
+    expect(tx.publication.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { currentRevisionId: 'revision-2' } }));
+    expect(tx.auditEvent.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: 'CORRECTED', revisionId: 'revision-2', beforeHash: 'before' }) }));
+  });
+
+  it('rejects stale or unsafe corrections without changing publication history', async () => {
+    const tx = { user: { findFirst: jest.fn().mockResolvedValue({ id: 'physician-1', role: 'PHYSICIAN', status: 'ACTIVE' }) }, publication: { findFirst: jest.fn().mockResolvedValue({ id: 'publication-1', currentRevisionId: 'revision-2', revisions: [{ id: 'revision-2', revisionNumber: 2, recommendations: ['Mantener seguimiento clínico.'], contentHash: 'before' }] }), update: jest.fn(), updateMany: jest.fn() }, publicationRevision: { create: jest.fn() }, auditEvent: { create: jest.fn() } };
+    const prisma = { user: { findFirst: jest.fn().mockResolvedValue({ id: 'physician-1', role: 'PHYSICIAN', status: 'ACTIVE' }) }, $transaction: jest.fn((fn) => fn(tx)) };
+    await expect(new ClinicalService(prisma as never).correctPublication('triage-1', 'version-1', 'physician-1', { expectedPublicationRevision: 1, reason: 'Corrección', recommendations: ['Mantener seguimiento clínico.'] })).rejects.toThrow();
+    await expect(new ClinicalService(prisma as never).correctPublication('triage-1', 'version-1', 'physician-1', { expectedPublicationRevision: 2, reason: '', recommendations: ['Prescriba 20 mg cada 8 horas.'] })).rejects.toThrow();
+    expect(tx.publicationRevision.create).not.toHaveBeenCalled();
+    expect(tx.publication.update).not.toHaveBeenCalled();
+    expect(tx.auditEvent.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('ClinicalService publication transaction race guards', () => {
+  it('aborts publication when the final version or triage lifecycle guard updates zero rows', async () => {
+    const tx = makePublicationTx();
+    tx.triageVersion.updateMany.mockResolvedValue({ count: 0 });
+    const prisma = { user: { findFirst: jest.fn().mockResolvedValue({ id: 'physician-1' }) }, $transaction: jest.fn((fn) => fn(tx)) };
+    await expect(new ClinicalService(prisma as never).publish('triage-1', 'version-1', 'physician-1', { expectedClinicalRevision: 4, expectedCollectionRevision: 5, expectedRecommendationRevision: 6 })).rejects.toThrow('cambió');
+    expect(tx.auditEvent.create).not.toHaveBeenCalled();
+    tx.triageVersion.updateMany.mockResolvedValue({ count: 1 });
+    tx.triage.updateMany.mockResolvedValue({ count: 0 });
+    await expect(new ClinicalService(prisma as never).publish('triage-1', 'version-1', 'physician-1', { expectedClinicalRevision: 4, expectedCollectionRevision: 5, expectedRecommendationRevision: 6 })).rejects.toThrow('cambió');
+  });
+
+  it('reauthorizes inside publication and correction transactions', async () => {
+    const publication = makePublicationTx();
+    publication.user.findFirst.mockResolvedValue(null);
+    publication.$queryRaw.mockResolvedValue([{ id: 'physician-1', role: 'PHYSICIAN', status: 'INACTIVE' }]);
+    const publishPrisma = { user: { findFirst: jest.fn().mockResolvedValue({ id: 'physician-1' }) }, $transaction: jest.fn((fn) => fn(publication)) };
+    await expect(new ClinicalService(publishPrisma as never).publish('triage-1', 'version-1', 'physician-1', { expectedClinicalRevision: 4, expectedCollectionRevision: 5, expectedRecommendationRevision: 6 })).rejects.toThrow('activo');
+    expect(publication.publication.create).not.toHaveBeenCalled();
+
+    const correction = makePublicationTx();
+    correction.publication.findFirst.mockResolvedValue({ id: 'publication-1', currentRevisionId: 'revision-1', revisions: [{ id: 'revision-1', revisionNumber: 1, severity: 'MILD', contentHash: 'before' }] });
+    correction.user.findFirst.mockResolvedValue(null);
+    correction.$queryRaw.mockResolvedValue([]);
+    const correctionPrisma = { user: { findFirst: jest.fn().mockResolvedValue({ id: 'physician-1' }) }, $transaction: jest.fn((fn) => fn(correction)) };
+    await expect(new ClinicalService(correctionPrisma as never).correctPublication('triage-1', 'version-1', 'physician-1', { expectedPublicationRevision: 1, reason: 'Actualización clínica', recommendations: ['Mantener seguimiento clínico actualizado.'] })).rejects.toThrow('activo');
+    expect(correction.publicationRevision.create).not.toHaveBeenCalled();
+  });
+
+  it('aborts correction when the current publication pointer update loses the race', async () => {
+    const tx = makePublicationTx();
+    tx.publication.findFirst.mockResolvedValue({ id: 'publication-1', currentRevisionId: 'revision-1', revisions: [{ id: 'revision-1', revisionNumber: 1, severity: 'MILD', contentHash: 'before' }] });
+    tx.publication.updateMany.mockResolvedValue({ count: 0 });
+    const prisma = { user: { findFirst: jest.fn().mockResolvedValue({ id: 'physician-1' }) }, $transaction: jest.fn((fn) => fn(tx)) };
+    await expect(new ClinicalService(prisma as never).correctPublication('triage-1', 'version-1', 'physician-1', { expectedPublicationRevision: 1, reason: 'Actualización clínica', recommendations: ['Mantener seguimiento clínico actualizado.'] })).rejects.toThrow('cambió');
+    expect(tx.auditEvent.create).not.toHaveBeenCalled();
+  });
+
+  it('independently aborts correction when the second current-pointer guard loses the race', async () => {
+    const tx = makePublicationTx();
+    tx.publication.findFirst.mockResolvedValue({ id: 'publication-1', currentRevisionId: 'revision-1', revisions: [{ id: 'revision-1', revisionNumber: 1, severity: 'MILD', contentHash: 'before' }] });
+    tx.publication.updateMany.mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 0 });
+    const prisma = { user: { findFirst: jest.fn().mockResolvedValue({ id: 'physician-1' }) }, $transaction: jest.fn((fn) => fn(tx)) };
+    await expect(new ClinicalService(prisma as never).correctPublication('triage-1', 'version-1', 'physician-1', { expectedPublicationRevision: 1, reason: 'Actualización clínica', recommendations: ['Mantener seguimiento clínico actualizado.'] })).rejects.toThrow('cambió');
+    expect(tx.publicationRevision.create).toHaveBeenCalledTimes(1);
+    expect(tx.auditEvent.create).not.toHaveBeenCalled();
+  });
+
+  it('independently aborts publication at either lifecycle guard', async () => {
+    const tx = makePublicationTx();
+    tx.triageVersion.findFirst.mockResolvedValue({ id: 'version-1', triageId: 'triage-1', createdById: 'physician-1', status: 'PENDING_REVIEW', finalSeverity: 'MILD', classificationRevision: 4, recommendationCollectionRevision: 5, recommendationRevision: 6, recommendations: [{ content: 'Mantener seguimiento clínico.', sortOrder: 1, isApproved: true }] });
+    tx.triageVersion.updateMany.mockResolvedValue({ count: 1 });
+    tx.triage.updateMany.mockResolvedValue({ count: 0 });
+    const prisma = { user: { findFirst: jest.fn().mockResolvedValue({ id: 'physician-1' }) }, $transaction: jest.fn((fn) => fn(tx)) };
+    await expect(new ClinicalService(prisma as never).publish('triage-1', 'version-1', 'physician-1', { expectedClinicalRevision: 4, expectedCollectionRevision: 5, expectedRecommendationRevision: 6 })).rejects.toThrow('cambió');
+    expect(tx.publication.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('ClinicalService database authorization lock', () => {
+  it('locks and validates the physician row inside publication and correction transactions', async () => {
+    const publication = makePublicationTx();
+    publication.user.findFirst.mockResolvedValue(null);
+    publication.$queryRaw = jest.fn().mockResolvedValue([{ id: 'physician-1', role: 'PHYSICIAN', status: 'INACTIVE' }]);
+    const publishPrisma = { user: { findFirst: jest.fn().mockResolvedValue({ id: 'physician-1' }) }, $transaction: jest.fn((fn) => fn(publication)) };
+    await expect(new ClinicalService(publishPrisma as never).publish('triage-1', 'version-1', 'physician-1', { expectedClinicalRevision: 4, expectedCollectionRevision: 5, expectedRecommendationRevision: 6 })).rejects.toThrow('activo');
+    expect(publication.$queryRaw).toHaveBeenCalledTimes(1);
+
+    const correction = makePublicationTx();
+    correction.user.findFirst.mockResolvedValue(null);
+    correction.$queryRaw.mockResolvedValue([]);
+    correction.$queryRaw = jest.fn().mockResolvedValue([]);
+    correction.publication.findFirst.mockResolvedValue({ id: 'publication-1', currentRevisionId: 'revision-1', revisions: [{ id: 'revision-1', revisionNumber: 1, severity: 'MILD', contentHash: 'before' }] });
+    const correctionPrisma = { user: { findFirst: jest.fn().mockResolvedValue({ id: 'physician-1' }) }, $transaction: jest.fn((fn) => fn(correction)) };
+    await expect(new ClinicalService(correctionPrisma as never).correctPublication('triage-1', 'version-1', 'physician-1', { expectedPublicationRevision: 1, reason: 'Actualización clínica', recommendations: ['Mantener seguimiento clínico actualizado.'] })).rejects.toThrow('activo');
+    expect(correction.$queryRaw).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('ClinicalService post-publication mutation guards', () => {
+  it('rejects recommendation mutations after publication and unsafe content before persistence', async () => {
+    const prisma = { recommendation: { findFirst: jest.fn().mockResolvedValue(null), create: jest.fn() }, triageVersion: { findFirst: jest.fn().mockResolvedValue({ status: 'APPROVED' }) } };
+    await expect(new ClinicalService(prisma as never).addRecommendation('triage-1', 'version-1', 'physician-1', 'Prescriba 20 mg cada 8 horas.', 0)).rejects.toThrow();
+    expect(prisma.recommendation.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects editing a published recommendation before attempting a write', async () => {
+    const prisma = { recommendation: { findFirst: jest.fn().mockResolvedValue(null), updateMany: jest.fn() }, triageVersion: { findFirst: jest.fn().mockResolvedValue({ status: 'APPROVED' }) } };
+    await expect(new ClinicalService(prisma as never).editRecommendation('triage-1', 'version-1', 'recommendation-1', 'physician-1', 'Mantener seguimiento clínico.', 0, new Date().toISOString(), 0)).rejects.toThrow();
+    expect(prisma.recommendation.updateMany).not.toHaveBeenCalled();
   });
 });
 

@@ -74,3 +74,26 @@ describe('ClinicalController recommendation HTTP validation', () => {
     expect(Object.values(service).every((fn) => (fn as jest.Mock).mock.calls.length === 0)).toBe(true);
   });
 });
+
+describe('ClinicalController publication contracts', () => {
+  it('forwards publication, correction, current guidance, history, and audit requests', async () => {
+    const service = {
+      publish: jest.fn(), correctPublication: jest.fn(), getCurrentGuidance: jest.fn(),
+      getPublicationHistory: jest.fn(), getPublicationAudit: jest.fn(),
+    };
+    const controller = new ClinicalController(service as never);
+    const user = { id: 'physician-1' };
+    const publishInput = { expectedClinicalRevision: 1, expectedCollectionRevision: 2, expectedRecommendationRevision: 3 };
+    const correctionInput = { expectedPublicationRevision: 1, reason: 'Corrección clínica válida', recommendations: ['Mantener seguimiento clínico.'] };
+    await controller.publish(triageId, versionId, publishInput, user);
+    await controller.correctPublication(triageId, versionId, correctionInput, user);
+    await controller.currentGuidance('patient-1', { id: 'assistant-1', role: 'ASSISTANT' });
+    await controller.publicationHistory(triageId, user);
+    await controller.publicationAudit(triageId, user);
+    expect(service.publish).toHaveBeenCalledWith(triageId, versionId, 'physician-1', publishInput);
+    expect(service.correctPublication).toHaveBeenCalledWith(triageId, versionId, 'physician-1', correctionInput);
+    expect(service.getCurrentGuidance).toHaveBeenCalledWith('patient-1', 'assistant-1', 'ASSISTANT');
+    expect(service.getPublicationHistory).toHaveBeenCalledWith(triageId, 'physician-1');
+    expect(service.getPublicationAudit).toHaveBeenCalledWith(triageId, 'physician-1');
+  });
+});

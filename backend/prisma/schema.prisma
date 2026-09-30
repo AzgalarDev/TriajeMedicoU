@@ -67,6 +67,9 @@ model User {
   createdRecommendations Recommendation[] @relation("RecommendationCreator")
   updatedRecommendations Recommendation[] @relation("RecommendationUpdater")
   approvedRecommendations Recommendation[] @relation("RecommendationApprover")
+  publications          Publication[]      @relation("PublicationPublisher")
+  publicationRevisions  PublicationRevision[] @relation("PublicationRevisionActor")
+  publicationAuditEvents AuditEvent[]      @relation("PublicationAuditActor")
   createdAt          DateTime          @default(now()) @map("created_at")
   updatedAt          DateTime          @updatedAt @map("updated_at")
 
@@ -111,6 +114,7 @@ model Triage {
   patient         User            @relation("TriagePatient", fields: [patientId], references: [id], onDelete: Restrict)
   patientId       String          @map("patient_id") @db.Uuid
   versions        TriageVersion[]
+  publications    Publication[]
   createdAt       DateTime        @default(now()) @map("created_at")
   updatedAt       DateTime        @updatedAt @map("updated_at")
 
@@ -159,6 +163,8 @@ model Triage {
   symptoms              TriageSymptom[]
   questions             TriageQuestion[]
   recommendations       Recommendation[]
+  publications          Publication[]
+  publicationRevisions  PublicationRevision[]
   createdAt             DateTime        @default(now()) @map("created_at")
   updatedAt             DateTime        @updatedAt @map("updated_at")
 
@@ -231,4 +237,83 @@ model Recommendation {
 enum RecommendationSource {
   MODEL
   MANUAL
+}
+
+enum PublicationStatus {
+  PUBLISHED
+  CORRECTED
+}
+
+enum AuditAction {
+  PUBLISHED
+  CORRECTED
+}
+
+model Publication {
+  id                String              @id @default(uuid()) @db.Uuid
+  triageId          String              @map("triage_id") @db.Uuid
+  triageVersionId   String              @map("triage_version_id") @db.Uuid
+  publishedById     String              @map("published_by_id") @db.Uuid
+  status            PublicationStatus   @default(PUBLISHED)
+  // Compound ownership FKs for this relation are declared in the additive SQL migration;
+  // Prisma does not model the required cross-table composite references here.
+  currentRevisionId String?             @unique @map("current_revision_id") @db.Uuid
+  triage            Triage              @relation(fields: [triageId], references: [id], onDelete: Restrict)
+  triageVersion     TriageVersion       @relation(fields: [triageVersionId], references: [id], onDelete: Restrict)
+  publishedBy       User                @relation("PublicationPublisher", fields: [publishedById], references: [id], onDelete: Restrict)
+  currentRevision   PublicationRevision? @relation("PublicationCurrentRevision", fields: [currentRevisionId], references: [id], onDelete: Restrict)
+  revisions         PublicationRevision[] @relation("PublicationRevisions")
+  auditEvents       AuditEvent[]
+  createdAt         DateTime            @default(now()) @map("created_at")
+  updatedAt         DateTime            @updatedAt @map("updated_at")
+
+  @@unique([triageId, triageVersionId])
+  @@index([triageId, createdAt])
+  @@map("publications")
+}
+
+model PublicationRevision {
+  id                  String       @id @default(uuid()) @db.Uuid
+  publicationId       String       @map("publication_id") @db.Uuid
+  revisionNumber      Int          @map("revision_number")
+  supersedesRevisionId String?     @map("supersedes_revision_id") @db.Uuid
+  triageVersionId     String       @map("triage_version_id") @db.Uuid
+  actorId             String       @db.Uuid
+  severity            Severity?
+  recommendations     Json
+  snapshot            Json
+  contentHash         String       @map("content_hash") @db.VarChar(64)
+  reason              String?
+  publishedAt         DateTime     @default(now()) @map("published_at")
+  publication         Publication  @relation("PublicationRevisions", fields: [publicationId], references: [id], onDelete: Restrict)
+  currentOf           Publication? @relation("PublicationCurrentRevision")
+  triageVersion       TriageVersion @relation(fields: [triageVersionId], references: [id], onDelete: Restrict)
+  actor               User         @relation("PublicationRevisionActor", fields: [actorId], references: [id], onDelete: Restrict)
+  supersedes          PublicationRevision? @relation("RevisionSupersession", fields: [supersedesRevisionId], references: [id], onDelete: Restrict)
+  corrections         PublicationRevision[] @relation("RevisionSupersession")
+  auditEvents         AuditEvent[]
+
+  @@unique([publicationId, revisionNumber])
+  @@index([triageVersionId, publishedAt])
+  @@index([supersedesRevisionId])
+  @@map("publication_revisions")
+}
+
+model AuditEvent {
+  id           String              @id @default(uuid()) @db.Uuid
+  publicationId String             @map("publication_id") @db.Uuid
+  revisionId   String?             @map("revision_id") @db.Uuid
+  actorId      String              @db.Uuid
+  action       AuditAction
+  beforeHash   String?             @map("before_hash") @db.VarChar(64)
+  afterHash    String?             @map("after_hash") @db.VarChar(64)
+  metadata     Json?
+  occurredAt   DateTime            @default(now()) @map("occurred_at")
+  publication  Publication         @relation(fields: [publicationId], references: [id], onDelete: Restrict)
+  revision     PublicationRevision? @relation(fields: [revisionId], references: [id], onDelete: Restrict)
+  actor        User                @relation("PublicationAuditActor", fields: [actorId], references: [id], onDelete: Restrict)
+
+  @@index([publicationId, occurredAt])
+  @@index([actorId, occurredAt])
+  @@map("audit_events")
 }
